@@ -1,0 +1,110 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    name: Unsigned IPA
+    runs-on: macos-26
+    steps:
+      - name: Check out wrapper
+        uses: actions/checkout@v4
+
+      - name: Download HiddenBlocks web build (gh-pages branch)
+        run: |
+          mkdir -p webbuild
+          curl -fL "https://codeload.github.com/a-user-of-python/hiddenblocks.github.io/tar.gz/refs/heads/gh-pages" -o webbuild.tar.gz
+          tar -xzf webbuild.tar.gz -C webbuild --strip-components=1
+          rm webbuild.tar.gz
+          echo "Web build files: $(find webbuild -type f | wc -l)"
+          test -f webbuild/editor.html
+          test -d webbuild/js
+
+      - name: Fetch the editor's GPL-3.0 license text
+        run: |
+          curl -fL "https://raw.githubusercontent.com/a-user-of-python/hiddenblocks.github.io/develop/LICENSE" -o editor-LICENSE.txt
+          head -n 3 editor-LICENSE.txt
+
+      - name: Prefetch offline assets and patch remote hosts to loopback
+        run: |
+          python3 Scripts/offline_prefetch.py \
+            --web webbuild \
+            --out-web App/HiddenBlocks/Web \
+            --out-offline App/HiddenBlocks/WebOffline
+          cp editor-LICENSE.txt App/HiddenBlocks/Web/LICENSE-GPL-3.0.txt
+          echo "Web files: $(find App/HiddenBlocks/Web -type f | wc -l)"
+          echo "WebOffline files: $(find App/HiddenBlocks/WebOffline -type f | wc -l)"
+          du -sh App/HiddenBlocks/Web App/HiddenBlocks/WebOffline
+
+      - name: Gate — addons, Terrain extension, patched hosts
+        run: |
+          set -e
+          PLAIN=$(ls App/HiddenBlocks/Web/js/addon-entry-*.js | grep -v '\.[0-9a-f]\{20\}\.js$' | wc -l | tr -d ' ')
+          echo "Separate addon-entry chunks: $PLAIN"
+          test "$PLAIN" = "48"
+          test -f App/HiddenBlocks/Web/js/addon-default-entry.js
+          grep -q "sb_terrain" App/HiddenBlocks/Web/js/vendors~editor~embed~fullscreen~player~playground.js
+          echo "Terrain extension (sb_terrain) present in VM chunk"
+          grep -q "/__scratch/" App/HiddenBlocks/Web/js/editor~embed~fullscreen~player~playground.js || \
+            grep -rq "/__scratch/" App/HiddenBlocks/Web/js/*.js
+          echo "Loopback asset paths present in patched chunks"
+          if grep -q "https://cdn.assets.scratch.mit.edu/internalapi/asset/" App/HiddenBlocks/Web/js/*.js; then
+            echo "FAIL: unpatched Scratch CDN asset URLs remain"
+            exit 1
+          fi
+          if grep -q "https://library.penguinmod.com/files/" App/HiddenBlocks/Web/js/*.js; then
+            echo "FAIL: unpatched PenguinMod library file URLs remain"
+            exit 1
+          fi
+          echo "Gate passed"
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project App/HiddenBlocks.xcodeproj \
+            -scheme HiddenBlocks \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Verify built app
+        run: |
+          PLIST="build/dd/Build/Products/Release-iphoneos/HiddenBlocks.app/Info.plist"
+          python3 - "$PLIST" <<'EOF'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              p = plistlib.load(f)
+          assert p.get("CFBundleIdentifier") == "com.user.hiddenblocks", p.get("CFBundleIdentifier")
+          assert p.get("CFBundleDisplayName") == "HiddenBlocks", p.get("CFBundleDisplayName")
+          assert p.get("UIDeviceFamily") == [1, 2], p.get("UIDeviceFamily")
+          assert p.get("NSCameraUsageDescription"), "missing camera usage string"
+          assert p.get("NSMicrophoneUsageDescription"), "missing microphone usage string"
+          print("bundle id:", p.get("CFBundleIdentifier"))
+          print("device family:", p.get("UIDeviceFamily"))
+          print("camera/mic usage strings present")
+          EOF
+          APP="build/dd/Build/Products/Release-iphoneos/HiddenBlocks.app"
+          echo "Bundled Web files: $(find "$APP/Web" -type f | wc -l)"
+          echo "Bundled WebOffline files: $(find "$APP/WebOffline" -type f | wc -l)"
+          test -f "$APP/Web/editor.html"
+          test -f "$APP/WebOffline/MANIFEST.json"
+
+      - name: Package IPA
+        run: |
+          APP_PATH="build/dd/Build/Products/Release-iphoneos/HiddenBlocks.app"
+          test -d "$APP_PATH"
+          rm -rf Payload HiddenBlocks-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry HiddenBlocks-unsigned.ipa Payload
+          ls -lh HiddenBlocks-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HiddenBlocks-unsigned
+          path: HiddenBlocks-unsigned.ipa

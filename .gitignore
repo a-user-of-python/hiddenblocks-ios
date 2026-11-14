@@ -1,0 +1,10 @@
+# The web editor and its offline asset mirror are assembled by CI from
+# the hiddenblocks.github.io gh-pages build; they are not stored here.
+App/HiddenBlocks/Web/*
+!App/HiddenBlocks/Web/.gitkeep
+App/HiddenBlocks/WebOffline/*
+!App/HiddenBlocks/WebOffline/.gitkeep
+webbuild/
+build/
+*.ipa
+.DS_Store
