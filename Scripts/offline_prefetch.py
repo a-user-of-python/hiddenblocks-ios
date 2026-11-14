@@ -176,19 +176,45 @@ def main():
     print(f"Local bundled copies reused: {local_copies}")
     print(f"Downloads queued: {len(jobs)} (hard: {sum(1 for j in jobs if j[2])})")
 
+    # Some sounds.json entries carry BOTH a Scratch-style md5ext and
+    # fromPenguinModLibrary + libraryFilePage: they are PenguinMod
+    # sounds whose real bytes come from the PenguinMod library (already
+    # queued above), and their md5ext has never existed on Scratch's
+    # CDN (it returns 404 there — verified). A 404 for such an entry is
+    # expected, not a missing asset. Detect them by checking that every
+    # occurrence of the asset id in the built JS sits inside an object
+    # marked fromPenguinModLibrary.
+    all_js_text = b"\n".join(js_blobs).decode("utf-8", errors="ignore")
+
+    def is_penguinmod_backed(asset_name):
+        asset_id = asset_name[:32]
+        positions = [m.start() for m in re.finditer(re.escape(asset_id), all_js_text)]
+        if not positions:
+            return False
+        return all("fromPenguinModLibrary" in all_js_text[max(0, p - 800):p + 800]
+                   for p in positions)
+
     hard_failures = []
     soft_failures = []
+    pm_backed_404s = []
     downloaded_bytes = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
-        futures = {pool.submit(fetch, url, dest): (url, hard) for url, dest, hard in jobs}
+        futures = {pool.submit(fetch, url, dest): (url, dest, hard) for url, dest, hard in jobs}
         for future in concurrent.futures.as_completed(futures):
-            url, hard = futures[future]
+            url, dest, hard = futures[future]
             try:
                 downloaded_bytes += future.result()
             except Exception as exc:  # noqa: BLE001 - collected and reported
-                (hard_failures if hard else soft_failures).append(str(exc))
+                message = str(exc)
+                if hard and "404" in message and "/internalapi/asset/" in url:
+                    asset_name = os.path.basename(dest)
+                    if is_penguinmod_backed(asset_name):
+                        pm_backed_404s.append(asset_name)
+                        continue
+                (hard_failures if hard else soft_failures).append(message)
     print(f"Downloaded {downloaded_bytes} bytes; hard failures: {len(hard_failures)}, "
           f"soft (preview) failures: {len(soft_failures)}")
+    print(f"Scratch-CDN 404s explained as PenguinMod-backed sounds: {len(pm_backed_404s)}")
     for failure in hard_failures[:20]:
         print("HARD FAILURE:", failure)
     if hard_failures:
@@ -258,6 +284,7 @@ def main():
         "localCopiesReused": local_copies,
         "downloadedBytes": downloaded_bytes,
         "softFailures": len(soft_failures),
+        "penguinModBackedScratch404s": len(pm_backed_404s),
         "patchCounts": patch_counts,
         "residualHostMentions": residuals,
         "offlineFiles": offline_files,
